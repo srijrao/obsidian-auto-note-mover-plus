@@ -1,0 +1,55 @@
+/* Auto Note Mover+ — preview dialog and rule summary */
+
+.anm-list {
+  max-height: 50vh;
+  overflow-y: auto;
+  margin: 0.5em 0 1em;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.anm-row {
+  display: flex;
+  gap: 0.5em;
+  align-items: baseline;
+  padding: 0.25em 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small);
+}
+
+.anm-row em {
+  color: var(--text-muted);
+}
+
+.anm-skipped {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: 0.5em;
+}
+
+.anm-hint {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.anm-actions {
+  display: flex;
+  gap: 0.5em;
+  justify-content: flex-end;
+}
+
+.anm-rule-summary {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin: -0.5em 0 0.75em;
+}
+
+.anm-json {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.anm-error {
+  color: var(--text-error);
+  min-height: 1.2em;
+}
