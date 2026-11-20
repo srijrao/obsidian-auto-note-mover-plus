@@ -552,7 +552,92 @@ class PreviewModal extends Modal {
 }
 
 /* ------------------------------------------------------------------ */
-/* Settings — same shape as Auto Note Mover, with the new fields      */
+/* Input suggestions (folder / tag) — dependency-free                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Attaches an Obsidian-styled suggestion list to a text input. Upstream Auto
+ * Note Mover depends on @popperjs/core for this; here the list is positioned
+ * from the input's rect and reuses Obsidian's own classes so it looks native.
+ */
+function attachSuggest(inputEl, source, onPick) {
+  if (!inputEl) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'suggestion-container anm-suggest';
+  const list = document.createElement('div');
+  list.className = 'suggestion';
+  wrap.appendChild(list);
+  wrap.style.position = 'fixed';
+  wrap.style.display = 'none';
+  wrap.style.zIndex = '1000';
+  document.body.appendChild(wrap);
+
+  let items = [];
+
+  const close = () => {
+    wrap.style.display = 'none';
+    items = [];
+  };
+
+  const place = () => {
+    const r = inputEl.getBoundingClientRect();
+    wrap.style.left = r.left + 'px';
+    wrap.style.top = r.bottom + 2 + 'px';
+    wrap.style.width = r.width + 'px';
+  };
+
+  const open = () => {
+    const q = inputEl.value.trim().toLowerCase();
+    items = source()
+      .filter((v) => !q || v.toLowerCase().includes(q))
+      .slice(0, 50);
+    if (!items.length) return close();
+    list.empty();
+    for (const value of items) {
+      const el = list.createDiv({ cls: 'suggestion-item', text: value });
+      el.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        inputEl.value = value;
+        inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        onPick(value);
+        close();
+      });
+    }
+    place();
+    wrap.style.display = 'block';
+  };
+
+  inputEl.addEventListener('input', open);
+  inputEl.addEventListener('focus', open);
+  inputEl.addEventListener('blur', () => setTimeout(close, 120));
+  inputEl.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') close();
+  });
+}
+
+const vaultFolders = (app) => () =>
+  app.vault.getAllLoadedFiles()
+    .filter((f) => f.children)            // TFolder
+    .map((f) => f.path)
+    .filter((p) => p && p !== '/');
+
+const vaultTags = (app) => () => {
+  const set = new Set();
+  for (const file of app.vault.getMarkdownFiles()) {
+    const cache = app.metadataCache.getFileCache(file);
+    let tags = [];
+    try { tags = obsidian.getAllTags(cache) || []; } catch (e) { tags = Object.keys((cache && cache.tags) || {}); }
+    for (const t of tags) set.add(t);
+  }
+  return [...set].sort();
+};
+
+function arrayMove(array, fromIndex, toIndex) {
+  array.splice(toIndex, 0, array.splice(fromIndex, 1)[0]);
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings — upstream layout, extended                              */
 /* ------------------------------------------------------------------ */
 
 class AnmSettingTab extends PluginSettingTab {
@@ -560,194 +645,403 @@ class AnmSettingTab extends PluginSettingTab {
 
   display() {
     const { containerEl } = this;
-    const s = this.plugin.settings;
     containerEl.empty();
-    containerEl.createEl('h2', { text: 'Auto Note Mover+' });
+    this.containerEl.empty();
+    this.add_auto_note_mover_setting();
+  }
 
-    new Setting(containerEl)
-      .setName('Trigger')
-      .setDesc('Automatic files notes as you edit. Manual only files when you run a command.')
-      .addDropdown((d) => d.addOption('Automatic', 'Automatic').addOption('Manual', 'Manual')
+  add_auto_note_mover_setting() {
+    const s = this.plugin.settings;
+    this.containerEl.createEl('h2', { text: 'Auto Note Mover Plus' });
+
+    // Same framing sentence as upstream, with the fork's extra trigger source named.
+    new Setting(this.containerEl).setDesc(
+      'Auto Note Mover Plus will automatically move the active notes to their respective folders according to the rules.',
+    );
+
+    /* ---- Trigger (upstream wording) ---- */
+    const descEl = document.createDocumentFragment();
+    const triggerDesc = document.createDocumentFragment();
+    triggerDesc.append(
+      'Choose how the trigger will be activated.', descEl.createEl('br'),
+      descEl.createEl('strong', { text: 'Automatic ' }),
+      'is triggered when you create, edit, or rename a note, and moves the note if it matches the rules.',
+      descEl.createEl('br'), 'You can also activate the trigger with a command.',
+      descEl.createEl('br'), descEl.createEl('strong', { text: 'Manual ' }),
+      'will not automatically move notes.', descEl.createEl('br'), 'You can trigger by command.',
+    );
+    new Setting(this.containerEl).setName('Trigger').setDesc(triggerDesc)
+      .addDropdown((dropDown) => dropDown
+        .addOption('Automatic', 'Automatic')
+        .addOption('Manual', 'Manual')
         .setValue(String(s.trigger_auto_manual))
-        .onChange(async (v) => { s.trigger_auto_manual = v; await this.plugin.saveSettings(); this.plugin.renderStatus(); }));
-
-    new Setting(containerEl)
-      .setName('Settle delay (ms)')
-      .setDesc('A note is filed only after it has been quiet this long, so a half-typed tag never files it. A rule can override it.')
-      .addText((t) => t.setValue(String(s.settle_ms))
-        .onChange(async (v) => { const n = Number(v); if (!isNaN(n) && n >= 0) { s.settle_ms = n; await this.plugin.saveSettings(); } }));
-
-    new Setting(containerEl)
-      .setName('Show status bar indicator')
-      .addToggle((t) => t.setValue(!!s.statusBar_trigger_indicator)
-        .onChange(async (v) => { s.statusBar_trigger_indicator = v; await this.plugin.saveSettings(); }));
-
-    new Setting(containerEl)
-      .setName('Use regex to check for tags')
-      .addToggle((t) => t.setValue(!!s.use_regex_to_check_for_tags)
-        .onChange(async (v) => { s.use_regex_to_check_for_tags = v; await this.plugin.saveSettings(); }));
-
-    containerEl.createEl('h3', { text: 'Rules (first match wins)' });
-    containerEl.createEl('p', {
-      cls: 'setting-item-description',
-      text: 'A rule uses ONE trigger: tag, filename pattern, or a property condition. Advanced multi-condition rules and per-rule delays are in "Advanced…".',
-    });
-
-    s.folder_tag_pattern.forEach((rule, i) => this.renderRule(containerEl, rule, i));
-
-    new Setting(containerEl)
-      .addButton((b) => b.setButtonText('Add rule').setCta().onClick(async () => {
-        s.folder_tag_pattern.push({ folder: '', tag: '', pattern: '' });
-        await this.plugin.saveSettings();
-        this.display();
-      }))
-      .addButton((b) => b.setButtonText('Preview moves').onClick(() => this.plugin.preview()));
-
-    containerEl.createEl('h3', { text: 'Excluded folders' });
-    containerEl.createEl('p', { cls: 'setting-item-description', text: 'A note whose current folder matches one of these is never moved.' });
-    (s.excluded_folder || []).forEach((entry, i) => {
-      const current = typeof entry === 'string' ? entry : (entry && entry.folder) || '';
-      new Setting(containerEl)
-        .addText((t) => t.setValue(current)
-          .onChange(async (v) => {
-            s.excluded_folder[i] = { folder: v.trim() };
-            await this.plugin.saveSettings();
-          }))
-        .addButton((b) => b.setButtonText('Remove').setWarning().onClick(async () => {
-          s.excluded_folder.splice(i, 1);
+        .onChange(async (value) => {
+          s.trigger_auto_manual = value;
           await this.plugin.saveSettings();
           this.display();
         }));
-    });
-    new Setting(containerEl).addButton((b) => b.setButtonText('Add excluded folder').onClick(async () => {
-      s.excluded_folder.push({ folder: '' });
-      await this.plugin.saveSettings();
-      this.display();
-    }));
-  }
 
-  renderRule(containerEl, rule, index) {
-    const s = this.plugin.settings;
-    const kind = Array.isArray(rule.conditions) && rule.conditions.length ? 'conditions'
-      : rule.property ? 'property' : rule.pattern ? 'pattern' : 'tag';
+    /* ---- Added: settle delay ---- */
+    const settleDesc = document.createDocumentFragment();
+    settleDesc.append(
+      'Choose how long a note must stay unchanged before it is moved, in milliseconds.',
+      descEl.createEl('br'),
+      'A note is moved only after it has been quiet for this long, so a half-typed tag does not send it away.',
+      descEl.createEl('br'),
+      descEl.createEl('strong', { text: '2000 ' }), 'is two seconds and suits most folders.',
+      descEl.createEl('br'),
+      'A single rule can set its own delay with ', descEl.createEl('strong', { text: 'Condition…' }), '.',
+    );
+    new Setting(this.containerEl).setName('Settle delay').setDesc(settleDesc)
+      .addText((text) => text
+        .setPlaceholder('2000')
+        .setValue(String(s.settle_ms))
+        .onChange(async (value) => {
+          const n = Number(value);
+          if (!Number.isNaN(n) && n >= 0) {
+            s.settle_ms = n;
+            await this.plugin.saveSettings();
+          }
+        }));
 
-    const setting = new Setting(containerEl);
-
-    setting.addText((t) => t.setPlaceholder('Folder').setValue(rule.folder || '')
-      .onChange(async (v) => { rule.folder = v.trim(); await this.plugin.saveSettings(); }));
-
-    setting.addDropdown((d) => d
-      .addOption('tag', 'Tag')
-      .addOption('pattern', 'Title by regex')
-      .addOption('property', 'Property')
-      .addOption('conditions', 'Advanced…')
-      .setValue(kind)
-      .onChange(async (v) => {
-        // Mirror the original XOR: exactly one trigger kind at a time.
-        delete rule.tag; delete rule.pattern; delete rule.property;
-        delete rule.op; delete rule.value; delete rule.conditions;
-        if (v === 'tag') rule.tag = '';
-        else if (v === 'pattern') rule.pattern = '';
-        else if (v === 'property') { rule.property = ''; rule.op = 'equals'; rule.value = ''; }
-        else rule.conditions = [{ property: '', op: 'equals', value: '' }];
+    /* ---- Use regex for tags (upstream) ---- */
+    const useRegexToCheckForTags = document.createDocumentFragment();
+    useRegexToCheckForTags.append(
+      'If enabled, tags will be checked with regular expressions.', descEl.createEl('br'),
+      'For example, if you want to match the #tag, you would write ',
+      descEl.createEl('strong', { text: '^#tag$' }), descEl.createEl('br'),
+      'This setting is for a specific purpose, such as specifying nested tags in bulk.',
+      descEl.createEl('br'),
+      descEl.createEl('strong', { text: 'If you want to use the suggested tags as they are, it is recommended to disable this setting.' }),
+    );
+    new Setting(this.containerEl).setName('Use regular expressions to check for tags').setDesc(useRegexToCheckForTags)
+      .addToggle((toggle) => toggle.setValue(!!s.use_regex_to_check_for_tags).onChange(async (value) => {
+        s.use_regex_to_check_for_tags = value;
         await this.plugin.saveSettings();
         this.display();
       }));
 
-    if (kind === 'tag') {
-      setting.addText((t) => t.setPlaceholder('#tag').setValue(rule.tag || '')
-        .onChange(async (v) => { rule.tag = v.trim(); await this.plugin.saveSettings(); }));
-    } else if (kind === 'pattern') {
-      setting.addText((t) => t.setPlaceholder('regex on filename').setValue(rule.pattern || '')
-        .onChange(async (v) => { rule.pattern = v; await this.plugin.saveSettings(); }));
-    } else if (kind === 'property') {
-      setting.addText((t) => t.setPlaceholder('property').setValue(rule.property || '')
-        .onChange(async (v) => { rule.property = v.trim(); await this.plugin.saveSettings(); }));
-      setting.addDropdown((d) => {
-        OPS.forEach((op) => d.addOption(op, op));
-        return d.setValue(rule.op || 'equals')
-          .onChange(async (v) => { rule.op = v; await this.plugin.saveSettings(); });
-      });
-      setting.addText((t) => t.setPlaceholder('value').setValue(rule.value === undefined ? '' : String(rule.value))
-        .onChange(async (v) => {
-          if (/^-?\d+(\.\d+)?$/.test(v.trim())) rule.value = Number(v.trim());
-          else if (/^\[.*\]$/.test(v.trim())) { try { rule.value = JSON.parse(v); } catch (e) { rule.value = v; } }
-          else rule.value = v;
+    /* ---- Add new rule (upstream wording, plus Preview) ---- */
+    const ruleDesc = document.createDocumentFragment();
+    ruleDesc.append(
+      '1. Set the destination folder.', descEl.createEl('br'),
+      '2. Set a tag or title that matches the note you want to move. ',
+      descEl.createEl('strong', { text: 'You can set either the tag or the title. ' }),
+      descEl.createEl('br'),
+      '3. The rules are checked in order from the top. The notes will be moved to the folder with the ',
+      descEl.createEl('strong', { text: 'first matching rule.' }), descEl.createEl('br'),
+      'Tag: Be sure to add a', descEl.createEl('strong', { text: ' # ' }), 'at the beginning.',
+      descEl.createEl('br'), 'Title: Tested by JavaScript regular expressions.',
+      descEl.createEl('br'),
+      'Condition: For a frontmatter property, a date, or a combination of them — open ',
+      descEl.createEl('strong', { text: 'Condition…' }), ' on the rule.',
+      descEl.createEl('br'), descEl.createEl('br'), 'Notice:', descEl.createEl('br'),
+      '1. Attached files will not be moved, but they will still appear in the note.',
+      descEl.createEl('br'),
+      '2. Auto Note Mover Plus will not move notes that have "',
+      descEl.createEl('strong', { text: 'AutoNoteMover: disable' }), '" in the frontmatter.',
+    );
+    new Setting(this.containerEl).setName('Add new rule').setDesc(ruleDesc)
+      .addButton((button) => button
+        .setTooltip('Add new rule').setButtonText('+').setCta()
+        .onClick(async () => {
+          s.folder_tag_pattern.push({ folder: '', tag: '', pattern: '' });
           await this.plugin.saveSettings();
-        }));
-    } else {
-      setting.addButton((b) => b.setButtonText('Edit conditions…').onClick(() => {
-        new ConditionsModal(this.app, rule, async () => { await this.plugin.saveSettings(); this.display(); }).open();
+          this.display();
+        }))
+      .addButton((button) => button
+        .setTooltip('Preview moves').setButtonText('Preview moves')
+        .onClick(() => this.plugin.preview()));
+
+    /* ---- One row per rule: same three inputs, one extra button ---- */
+    s.folder_tag_pattern.forEach((rule, index) => {
+      const settings = s.folder_tag_pattern;
+      const settingTag = settings.map((e) => e.tag);
+      const settingPattern = settings.map((e) => e.pattern);
+      const checkArr = (arr, val) => arr.some((arrVal) => val === arrVal);
+
+      const row = new Setting(this.containerEl)
+        .addSearch((cb) => {
+          cb.setPlaceholder('Folder')
+            .setValue(rule.folder || '')
+            .onChange(async (newFolder) => {
+              settings[index].folder = newFolder.trim();
+              await this.plugin.saveSettings();
+            });
+          attachSuggest(cb.inputEl, vaultFolders(this.app), (picked) => {
+            settings[index].folder = picked;
+            this.plugin.saveSettings();
+          });
+        })
+        .addSearch((cb) => {
+          cb.setPlaceholder('Tag')
+            .setValue(rule.tag || '')
+            .onChange(async (newTag) => {
+              if (settings[index].pattern) {
+                this.display();
+                return new Notice('You can set either the tag or the title.');
+              }
+              if (settings[index].property || (settings[index].conditions || []).length) {
+                this.display();
+                return new Notice('You can set either the tag, the title, or a condition.');
+              }
+              if (newTag && checkArr(settingTag, newTag)) {
+                new Notice('This tag is already used.');
+                return;
+              }
+              settings[index].tag = s.use_regex_to_check_for_tags ? newTag : newTag.trim();
+              await this.plugin.saveSettings();
+            });
+          attachSuggest(cb.inputEl, vaultTags(this.app), (picked) => {
+            settings[index].tag = s.use_regex_to_check_for_tags ? picked : picked.trim();
+            this.plugin.saveSettings();
+          });
+        })
+        .addSearch((cb) => {
+          cb.setPlaceholder('Title by regex')
+            .setValue(rule.pattern || '')
+            .onChange(async (newPattern) => {
+              if (settings[index].tag) {
+                this.display();
+                return new Notice('You can set either the tag or the title.');
+              }
+              if (settings[index].property || (settings[index].conditions || []).length) {
+                this.display();
+                return new Notice('You can set either the tag, the title, or a condition.');
+              }
+              if (newPattern && checkArr(settingPattern, newPattern)) {
+                new Notice('This pattern is already used.');
+                return;
+              }
+              settings[index].pattern = newPattern;
+              await this.plugin.saveSettings();
+            });
+        })
+        /* Added: the property / advanced editor */
+        .addExtraButton((cb) => cb
+          .setIcon('sliders-horizontal').setTooltip('Condition…')
+          .onClick(() => {
+            new ConditionModal(this.app, settings[index], async () => {
+              await this.plugin.saveSettings();
+              this.display();
+            }).open();
+          }))
+        .addExtraButton((cb) => cb
+          .setIcon('chevron-up').setTooltip('Move up')
+          .onClick(async () => {
+            arrayMove(s.folder_tag_pattern, index, index - 1);
+            await this.plugin.saveSettings();
+            this.display();
+          }))
+        .addExtraButton((cb) => cb
+          .setIcon('chevron-down').setTooltip('Move down')
+          .onClick(async () => {
+            arrayMove(s.folder_tag_pattern, index, index + 1);
+            await this.plugin.saveSettings();
+            this.display();
+          }))
+        .addExtraButton((cb) => cb
+          .setIcon('x').setTooltip('Delete')
+          .onClick(async () => {
+            s.folder_tag_pattern.splice(index, 1);
+            await this.plugin.saveSettings();
+            this.display();
+          }));
+
+      // Upstream hides the empty label column so a row reads as three inputs.
+      // A rule that uses a condition keeps its label, because the condition is
+      // worth seeing at a glance.
+      if (this.hasCondition(rule)) row.setName(this.plugin.ruleLabel(rule));
+      else row.infoEl.remove();
+    });
+
+    /* ---- Excluded folders (upstream) ---- */
+    const useRegexToCheckForExcludedFolder = document.createDocumentFragment();
+    useRegexToCheckForExcludedFolder.append('If enabled, excluded folder will be checked with regular expressions.');
+    new Setting(this.containerEl).setName('Use regular expressions to check for excluded folder').setDesc(useRegexToCheckForExcludedFolder)
+      .addToggle((toggle) => toggle.setValue(!!s.use_regex_to_check_for_excluded_folder).onChange(async (value) => {
+        s.use_regex_to_check_for_excluded_folder = value;
+        await this.plugin.saveSettings();
+        this.display();
       }));
-    }
 
-    setting.addExtraButton((b) => b.setIcon('arrow-up').setTooltip('Move up').onClick(async () => {
-      if (index > 0) {
-        s.folder_tag_pattern.splice(index - 1, 0, s.folder_tag_pattern.splice(index, 1)[0]);
-        await this.plugin.saveSettings(); this.display();
-      }
-    }));
-    setting.addExtraButton((b) => b.setIcon('arrow-down').setTooltip('Move down').onClick(async () => {
-      if (index < s.folder_tag_pattern.length - 1) {
-        s.folder_tag_pattern.splice(index + 1, 0, s.folder_tag_pattern.splice(index, 1)[0]);
-        await this.plugin.saveSettings(); this.display();
-      }
-    }));
-    setting.addExtraButton((b) => b.setIcon('trash').setTooltip('Delete').onClick(async () => {
-      s.folder_tag_pattern.splice(index, 1);
-      await this.plugin.saveSettings(); this.display();
-    }));
+    const excludedFolderDesc = document.createDocumentFragment();
+    excludedFolderDesc.append(
+      'Notes in the excluded folder will not be moved.', descEl.createEl('br'),
+      'This takes precedence over the notes movement rules.',
+    );
+    new Setting(this.containerEl).setName('Add Excluded Folder').setDesc(excludedFolderDesc)
+      .addButton((button) => button
+        .setTooltip('Add Excluded Folders').setButtonText('+').setCta()
+        .onClick(async () => {
+          s.excluded_folder.push({ folder: '' });
+          await this.plugin.saveSettings();
+          this.display();
+        }));
 
-    const summary = this.plugin.ruleLabel(rule);
-    const note = rule.settle !== undefined ? ` · settle ${rule.settle}` : '';
-    if (summary !== '(no trigger)') {
-      containerEl.createEl('div', { cls: 'anm-rule-summary', text: summary + note });
-    }
+    s.excluded_folder.forEach((entry, index) => {
+      const current = typeof entry === 'string' ? entry : (entry && entry.folder) || '';
+      const row = new Setting(this.containerEl)
+        .addSearch((cb) => {
+          cb.setPlaceholder('Folder').setValue(current)
+            .onChange(async (newFolder) => {
+              s.excluded_folder[index] = { folder: newFolder };
+              await this.plugin.saveSettings();
+            });
+          attachSuggest(cb.inputEl, vaultFolders(this.app), (picked) => {
+            s.excluded_folder[index] = { folder: picked };
+            this.plugin.saveSettings();
+          });
+        })
+        .addExtraButton((cb) => cb.setIcon('chevron-up').setTooltip('Move up').onClick(async () => {
+          arrayMove(s.excluded_folder, index, index - 1);
+          await this.plugin.saveSettings();
+          this.display();
+        }))
+        .addExtraButton((cb) => cb.setIcon('chevron-down').setTooltip('Move down').onClick(async () => {
+          arrayMove(s.excluded_folder, index, index + 1);
+          await this.plugin.saveSettings();
+          this.display();
+        }))
+        .addExtraButton((cb) => cb.setIcon('x').setTooltip('Delete').onClick(async () => {
+          s.excluded_folder.splice(index, 1);
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+      row.infoEl.remove();
+    });
+
+    /* ---- Status bar (upstream) ---- */
+    const statusBarTriggerIndicatorDesc = document.createDocumentFragment();
+    statusBarTriggerIndicatorDesc.append(
+      'The status bar will display [A] if the trigger is Automatic, and [M] for Manual.', descEl.createEl('br'),
+      'To change the setting, you need to restart Obsidian.', descEl.createEl('br'),
+      'Desktop only.',
+    );
+    new Setting(this.containerEl).setName('Status Bar Trigger Indicator').setDesc(statusBarTriggerIndicatorDesc)
+      .addToggle((toggle) => toggle.setValue(!!s.statusBar_trigger_indicator).onChange(async (value) => {
+        s.statusBar_trigger_indicator = value;
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+  }
+
+  hasCondition(rule) {
+    return !!(rule.property || (Array.isArray(rule.conditions) && rule.conditions.length)
+      || (Array.isArray(rule.block) && rule.block.length));
   }
 }
 
-class ConditionsModal extends Modal {
+/* ------------------------------------------------------------------ */
+/* Condition editor — the added trigger source                        */
+/* ------------------------------------------------------------------ */
+
+class ConditionModal extends Modal {
   constructor(app, rule, onSave) { super(app); this.rule = rule; this.onSave = onSave; }
 
   onOpen() {
     const { contentEl } = this;
+    const r = this.rule;
     contentEl.empty();
-    contentEl.createEl('h2', { text: 'Conditions' });
+    contentEl.createEl('h2', { text: 'Condition' });
+
+    const intro = document.createDocumentFragment();
+    intro.append(
+      'Use a condition instead of a tag or a title when the note is identified by its frontmatter.',
+      intro.createEl('br'),
+      'A note is moved when the property satisfies the operator, for example ',
+      intro.createEl('strong', { text: 'due older_than 14d' }),
+      intro.createEl('br'),
+      'Dates are read as instants, and ', intro.createEl('strong', { text: 'today' }),
+      ', ', intro.createEl('strong', { text: '-30d' }),
+      ' and ', intro.createEl('strong', { text: 'start_of_month' }), ' are understood.',
+    );
+    const introEl = contentEl.createEl('p', { cls: 'setting-item-description' });
+    introEl.appendChild(intro);
+
+    let property = r.property || '';
+    let op = r.op || 'equals';
+    let value = r.value === undefined ? '' : (typeof r.value === 'string' ? r.value : JSON.stringify(r.value));
+    let settle = r.settle === undefined ? '' : String(r.settle);
+    let extra = JSON.stringify(r.conditions && r.conditions.length ? r.conditions : [], null, 2);
+    let blockers = JSON.stringify(r.block && r.block.length ? r.block : [], null, 2);
+
+    new Setting(contentEl).setName('Property').setDesc('The frontmatter key, or file.mtime, file.age and so on.')
+      .addText((t) => t.setPlaceholder('due').setValue(property).onChange((v) => { property = v.trim(); }));
+
+    new Setting(contentEl).setName('Operator').setDesc('How the property is compared.')
+      .addDropdown((d) => {
+        OPS.forEach((o) => d.addOption(o, o));
+        return d.setValue(op).onChange((v) => { op = v; });
+      });
+
+    new Setting(contentEl).setName('Value').setDesc('A literal, a date, a list in brackets, or a duration such as 14d.')
+      .addText((t) => t.setPlaceholder('value').setValue(value).onChange((v) => { value = v; }));
+
+    new Setting(contentEl).setName('Settle for this rule').setDesc('Optional. Overrides the settle delay above; leave empty to inherit it.')
+      .addText((t) => t.setPlaceholder('2000').setValue(settle).onChange((v) => { settle = v.trim(); }));
+
+    contentEl.createEl('h3', { text: 'Advanced' });
     contentEl.createEl('p', {
       cls: 'setting-item-description',
-      text: 'JSON. One object per condition: {"property":"due","op":"older_than","value":"14d"} · {"tag":"#haco/email"} · {"pattern":"Dalton Chat"}. Blockers veto the rule.',
+      text: 'Optional. Several conditions combined with all or any, and blockers that veto the rule. Leave both as [] to use only the condition above.',
     });
+    contentEl.createEl('p', { text: 'Conditions', cls: 'setting-item-name' });
+    const extraArea = contentEl.createEl('textarea', { cls: 'anm-json' });
+    extraArea.value = extra; extraArea.rows = 6; extraArea.style.width = '100%';
+    extraArea.addEventListener('input', () => { extra = extraArea.value; });
 
-    const whenArea = contentEl.createEl('textarea', { cls: 'anm-json' });
-    whenArea.value = JSON.stringify(this.rule.conditions || [], null, 2);
-    whenArea.rows = 8;
-    whenArea.style.width = '100%';
-
-    contentEl.createEl('p', { text: 'Blockers (optional)' });
+    contentEl.createEl('p', { text: 'Blockers', cls: 'setting-item-name' });
     const blockArea = contentEl.createEl('textarea', { cls: 'anm-json' });
-    blockArea.value = JSON.stringify(this.rule.block || [], null, 2);
-    blockArea.rows = 4;
-    blockArea.style.width = '100%';
+    blockArea.value = blockers; blockArea.rows = 4; blockArea.style.width = '100%';
+    blockArea.addEventListener('input', () => { blockers = blockArea.value; });
 
     const err = contentEl.createEl('p', { cls: 'anm-error' });
+
     new Setting(contentEl)
       .addButton((b) => b.setButtonText('Save').setCta().onClick(async () => {
         try {
-          const when = JSON.parse(whenArea.value || '[]');
-          const block = JSON.parse(blockArea.value || '[]');
-          if (!Array.isArray(when) || !Array.isArray(block)) throw new Error('both must be arrays');
-          for (const c of when.concat(block)) {
+          const parsedExtra = JSON.parse(extra || '[]');
+          const parsedBlock = JSON.parse(blockers || '[]');
+          if (!Array.isArray(parsedExtra) || !Array.isArray(parsedBlock)) throw new Error('conditions and blockers must be arrays');
+          for (const c of parsedExtra.concat(parsedBlock)) {
             if (!c || typeof c !== 'object') throw new Error('each condition must be an object');
-            if (c.op && !OPS.includes(c.op)) throw new Error(`unknown op "${c.op}"`);
+            if (c.op && !OPS.includes(c.op)) throw new Error(`unknown operator "${c.op}"`);
             if (c.tag === undefined && c.pattern === undefined && !c.property) {
               throw new Error('a condition needs "property", "tag" or "pattern"');
             }
           }
-          this.rule.conditions = when;
-          this.rule.block = block;
+          if (!parsedExtra.length && !property) throw new Error('enter a property, or add a condition under Advanced');
+
+          // A condition replaces the tag and the title, as upstream keeps them exclusive.
+          delete r.tag;
+          delete r.pattern;
+
+          if (property) {
+            r.property = property;
+            r.op = op;
+            const trimmed = String(value).trim();
+            if (/^-?\d+(\.\d+)?$/.test(trimmed)) r.value = Number(trimmed);
+            else if (/^\[.*\]$/.test(trimmed)) r.value = JSON.parse(trimmed);
+            else r.value = trimmed;
+          } else {
+            delete r.property; delete r.op; delete r.value;
+          }
+
+          r.conditions = parsedExtra;
+          r.block = parsedBlock;
+          if (settle === '') delete r.settle; else r.settle = settle;
+
           await this.onSave();
           this.close();
-        } catch (e) { err.setText('Invalid: ' + e.message); }
+        } catch (e) {
+          err.setText('Invalid: ' + e.message);
+        }
+      }))
+      .addButton((b) => b.setButtonText('Clear condition').onClick(async () => {
+        delete r.property; delete r.op; delete r.value; delete r.conditions; delete r.block;
+        await this.onSave();
+        this.close();
       }))
       .addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
   }
@@ -755,6 +1049,8 @@ class ConditionsModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+// Test seam: the settings tab and condition editor are exercised headlessly.
+AutoNoteMoverPlugin._ui = { AnmSettingTab, ConditionModal, PreviewModal, attachSuggest, arrayMove };
 AutoNoteMoverPlugin._engine = {
   OPS, parseDateMs, parseDurationMs, parseWhenMs, checkCondition, ruleMatches, firstMatch, eqValues,
 };
