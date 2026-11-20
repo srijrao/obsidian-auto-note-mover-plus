@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 — rule rows flow like upstream again
+
+- Adding the `Condition…` button made each rule row four buttons wide, pushing the three
+  inputs past the settings pane width so they stacked into a column. Rows now share the
+  line: the inputs get a flex share with a 7rem floor and the buttons stay fixed, so they
+  wrap the way they did in the original instead of forming a column.
+- Stylesheet is scoped to `.anm-settings`, the class the settings tab now carries, so no
+  other plugin's rows are affected.
 ## 1.0.1 — settings match upstream Auto Note Mover
 
 - The settings tab now follows the original layout exactly: same heading, same

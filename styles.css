@@ -1,4 +1,28 @@
-/* Auto Note Mover+ — preview dialog and rule summary */
+/* Auto Note Mover+ — preview dialog and rule rows */
+
+/*
+ * Rule rows.
+ *
+ * Upstream Auto Note Mover ships no stylesheet, so its rows are three inputs and
+ * three icon buttons flowing inside Obsidian's default `.setting-item-control`.
+ * The fork's fourth button pushed that flow past the pane width and the inputs
+ * stacked into a column. Give each input a share of the line and let them wrap.
+ */
+.anm-settings .setting-item-control {
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  row-gap: 0.35rem;
+}
+
+.anm-settings .setting-item-control input[type="search"] {
+  flex: 1 1 7rem;
+  min-width: 7rem;
+}
+
+.anm-settings .setting-item-control .clickable-icon,
+.anm-settings .setting-item-control button {
+  flex: 0 0 auto;
+}
 
 .anm-list {
   max-height: 50vh;

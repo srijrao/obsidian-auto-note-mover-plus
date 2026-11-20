@@ -646,6 +646,7 @@ class AnmSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    containerEl.addClass('anm-settings');
     this.containerEl.empty();
     this.add_auto_note_mover_setting();
   }
