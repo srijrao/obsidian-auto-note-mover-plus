@@ -71,6 +71,14 @@
 .anm-json {
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Advanced conditions/blockers, hidden until switched on */
+.anm-advanced textarea {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .anm-error {

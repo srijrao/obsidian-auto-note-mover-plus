@@ -1,7 +1,7 @@
 {
   "id": "auto-note-mover-plus",
   "name": "Auto Note Mover Plus",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minAppVersion": "1.4.0",
   "description": "Move notes into folders by ordered rules on tags, filenames, or frontmatter conditions, including comparisons and dates, with a delay and a preview before moving.",
   "author": "Justin Changalpet",

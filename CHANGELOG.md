@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.3 — no more stray [] boxes in the condition editor
+
+- The two advanced JSON boxes (Conditions, Blockers) were always rendered and pre-filled
+  with `[]`, so the dialog ended in a pair of empty boxes — on mobile that reads as two
+  bare `[]` under the form. They now sit behind an **Advanced** toggle, closed unless the
+  rule already has advanced conditions or blockers.
+- Textareas are width-constrained and single-column, so they lay out the same on a phone.
 ## 1.0.2 — rule rows flow like upstream again
 
 - Adding the `Condition…` button made each rule row four buttons wide, pushing the three

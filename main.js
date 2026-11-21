@@ -982,19 +982,31 @@ class ConditionModal extends Modal {
     new Setting(contentEl).setName('Settle for this rule').setDesc('Optional. Overrides the settle delay above; leave empty to inherit it.')
       .addText((t) => t.setPlaceholder('2000').setValue(settle).onChange((v) => { settle = v.trim(); }));
 
-    contentEl.createEl('h3', { text: 'Advanced' });
-    contentEl.createEl('p', {
-      cls: 'setting-item-description',
-      text: 'Optional. Several conditions combined with all or any, and blockers that veto the rule. Leave both as [] to use only the condition above.',
-    });
-    contentEl.createEl('p', { text: 'Conditions', cls: 'setting-item-name' });
-    const extraArea = contentEl.createEl('textarea', { cls: 'anm-json' });
-    extraArea.value = extra; extraArea.rows = 6; extraArea.style.width = '100%';
+    // Advanced stays out of the way: two empty JSON boxes read as noise (and on
+    // mobile render as little more than a pair of []), so they are collapsed
+    // unless this rule already uses them.
+    const hasAdvanced = (Array.isArray(r.conditions) && r.conditions.length)
+      || (Array.isArray(r.block) && r.block.length);
+    let advancedOpen = !!hasAdvanced;
+    const advWrap = contentEl.createDiv({ cls: 'anm-advanced' });
+    advWrap.style.display = advancedOpen ? '' : 'none';
+
+    new Setting(contentEl)
+      .setName('Advanced')
+      .setDesc('Optional. Several conditions combined with all or any, and blockers that veto the rule. Most rules do not need this.')
+      .addToggle((toggle) => toggle.setValue(advancedOpen).onChange((value) => {
+        advancedOpen = value;
+        advWrap.style.display = value ? '' : 'none';
+      }));
+
+    advWrap.createEl('p', { text: 'Conditions', cls: 'setting-item-name' });
+    const extraArea = advWrap.createEl('textarea', { cls: 'anm-json' });
+    extraArea.value = extra; extraArea.rows = 6;
     extraArea.addEventListener('input', () => { extra = extraArea.value; });
 
-    contentEl.createEl('p', { text: 'Blockers', cls: 'setting-item-name' });
-    const blockArea = contentEl.createEl('textarea', { cls: 'anm-json' });
-    blockArea.value = blockers; blockArea.rows = 4; blockArea.style.width = '100%';
+    advWrap.createEl('p', { text: 'Blockers', cls: 'setting-item-name' });
+    const blockArea = advWrap.createEl('textarea', { cls: 'anm-json' });
+    blockArea.value = blockers; blockArea.rows = 4;
     blockArea.addEventListener('input', () => { blockers = blockArea.value; });
 
     const err = contentEl.createEl('p', { cls: 'anm-error' });
