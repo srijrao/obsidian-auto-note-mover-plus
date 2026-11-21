@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.0 — rules as pills, properties from the vault
+
+- **Rule layout switch** (Settings → Rule layout): *Pills* or *Classic rows*. Classic is
+  upstream's three inputs untouched; pills is the new view.
+- **A rule reads as a sentence**: `→ folder` then condition pills joined by `∧` (all) or
+  `∨` (any), then `unless` blockers. Tap any pill or the folder to edit the rule; the row
+  keeps upstream's move-up / move-down / delete buttons.
+- **Rule sheet**: folder with autocomplete, all/any, the condition list with per-condition
+  type (tag, title by regex, property), an `unless` blocker list, a per-rule settle, and a
+  live count — "N notes in the vault match this rule" — computed against the vault as you
+  edit.
+- **Property editor**: keys come from the vault's own frontmatter (most-used first, with a
+  note count), operators are filtered by the key's value type (dates get before/after/on/
+  older_than, numbers get gt/lt/between, booleans get equals), values are offered from the
+  values actually seen for that key, and the same live match count is shown.
+- **Storage stays compatible**: a rule with one condition and no blockers is still written
+  in the original flat shape (`tag` / `pattern` / `property`+`op`+`value`), so existing rules
+  and older copies read it unchanged; the list shape (`when`, `match`, `block`) is written
+  only when a rule needs more than one condition or a blocker.
 ## 1.0.3 — no more stray [] boxes in the condition editor
 
 - The two advanced JSON boxes (Conditions, Blockers) were always rendered and pre-filled

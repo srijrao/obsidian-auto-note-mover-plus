@@ -88,6 +88,27 @@ Advanced rules take an array of conditions plus optional blockers:
 }
 ```
 
+
+## Rule layouts
+
+Two ways to edit the same rules — switch any time under **Rule layout**:
+
+- **Pills** (default) — each rule reads as a sentence: `→ folder`, then condition pills
+  joined by `∧` (all) or `∨` (any), then `unless` blockers. Tap a pill to edit it. Rows stay
+  readable on a phone because nothing is an input box.
+- **Classic rows** — Auto Note Mover's original three inputs (folder, tag, title by regex)
+  with their autocomplete.
+
+The rule sheet holds the folder, the all/any switch, the condition list, the blockers and a
+per-rule settle delay, and shows **how many notes in the vault match** as you edit. Inside a
+property condition, keys are offered from your vault's frontmatter (most-used first),
+operators are filtered by the key's value type, and values come from the values you actually
+use.
+
+Rules that carry one condition and no blockers are still saved in the original flat
+`tag`/`pattern`/`property` shape, so an existing setup, or an older copy of the plugin, reads
+them exactly as before.
+
 ## Preview before moving
 
 Run **Preview moves (whole vault)** from the command palette or the settings tab. You get a

@@ -68,6 +68,76 @@
   margin: -0.5em 0 0.75em;
 }
 
+/* Pills — one rule reads as a sentence */
+
+.anm-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+}
+
+.anm-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 100%;
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
+
+.anm-pill:hover {
+  background: var(--background-modifier-active-hover);
+}
+
+.anm-pill-folder {
+  background: var(--background-secondary);
+}
+
+.anm-pill-block {
+  border-style: dashed;
+}
+
+.anm-pill-glyph {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+}
+
+.anm-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anm-connector,
+.anm-unless {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.anm-empty-inline,
+.anm-empty {
+  color: var(--text-faint);
+  font-style: italic;
+  font-size: var(--font-ui-smaller);
+}
+
+.anm-count {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* Thumb-sized targets on a phone */
+.is-mobile .anm-pill {
+  min-height: 34px;
+  padding: 0.25rem 0.6rem;
+}
+
 .anm-json {
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);

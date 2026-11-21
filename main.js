@@ -265,29 +265,76 @@ function checkCondition(cond, ctx) {
 }
 
 /**
- * Does a rule match? Extended rules first (`conditions`, then `property`), then the
- * original Auto Note Mover branches (pattern, then tag) so v1.2.0 rule arrays keep
- * behaving exactly as before.
+ * One rule can hold several conditions. `when` is the pill-list shape
+ * ({kind, ...}); the older shapes are read into it so v1.2.0 rule arrays and the
+ * flat `property` form keep behaving exactly as before.
  */
+function whenOf(cond) {
+  if (!cond || typeof cond !== 'object') return null;
+  if (cond.kind === 'tag') return { tag: cond.value };
+  if (cond.kind === 'pattern') return { pattern: cond.value };
+  if (cond.kind === 'prop' || cond.property) {
+    return { property: cond.property, op: cond.op || 'equals', value: cond.value };
+  }
+  if (cond.tag !== undefined) return { tag: cond.tag };
+  if (cond.pattern !== undefined) return { pattern: cond.pattern };
+  return null;
+}
+
+function ruleConditions(rule) {
+  if (Array.isArray(rule.when) && rule.when.length) {
+    return rule.when.map(whenOf).filter(Boolean);
+  }
+  if (Array.isArray(rule.conditions) && rule.conditions.length) {
+    return rule.conditions.map(whenOf).filter(Boolean);
+  }
+  if (rule.property) {
+    return [{ property: rule.property, op: rule.op || 'equals', value: rule.value }];
+  }
+  if (rule.pattern) return [{ pattern: rule.pattern }];
+  if (rule.tag) return [{ tag: rule.tag }];
+  return [];
+}
+
+/** Does a rule match? Blockers veto; then conditions combine with all/any. */
 function ruleMatches(rule, ctx) {
   if (!rule || rule.enabled === false) return false;
 
-  const blockers = rule.block || [];
-  for (const b of blockers) if (checkCondition(b, ctx)[0]) return false;
+  for (const b of rule.block || []) {
+    const cond = whenOf(b);
+    if (cond && checkCondition(cond, ctx)[0]) return false;
+  }
 
-  if (Array.isArray(rule.conditions) && rule.conditions.length) {
-    const results = rule.conditions.map((c) => checkCondition(c, ctx)[0]);
-    return String(rule.match || 'all').toLowerCase() === 'any'
-      ? results.some(Boolean) : results.every(Boolean);
+  const conds = ruleConditions(rule);
+  if (!conds.length) return false;
+  const results = conds.map((c) => checkCondition(c, ctx)[0]);
+  return String(rule.match || 'all').toLowerCase() === 'any'
+    ? results.some(Boolean) : results.every(Boolean);
+}
+
+/**
+ * Collapse back to the flat, one-trigger shape whenever a rule carries exactly
+ * one condition and no blockers, so old copies and upstream's parser still read
+ * it. The list shape is written only when a rule actually needs it.
+ */
+function applyRuleShape(rule) {
+  const when = rule.when;
+  if (!Array.isArray(when) || when.length !== 1) return;
+  if ((rule.block || []).length) return;
+  if (String(rule.match || 'all').toLowerCase() === 'any') return;
+
+  const c = when[0];
+  delete rule.when; delete rule.match; delete rule.block;
+  delete rule.tag; delete rule.pattern; delete rule.property;
+  delete rule.op; delete rule.value; delete rule.conditions;
+
+  if (c.kind === 'tag') rule.tag = c.value;
+  else if (c.kind === 'pattern') rule.pattern = c.value;
+  else if (c.kind === 'prop') {
+    rule.property = c.property;
+    rule.op = c.op || 'equals';
+    rule.value = c.value;
   }
-  if (rule.property) {
-    return checkCondition({ property: rule.property, op: rule.op || 'equals', value: rule.value }, ctx)[0];
-  }
-  if (rule.pattern) {
-    try { return new RegExp(rule.pattern).test(ctx.basename); } catch (e) { return false; }
-  }
-  if (rule.tag) return ctx.tags.includes(String(rule.tag).trim());
-  return false;
 }
 
 function firstMatch(rules, ctx) {
@@ -447,13 +494,13 @@ class AutoNoteMoverPlugin extends Plugin {
   }
 
   ruleLabel(rule) {
-    if (Array.isArray(rule.conditions) && rule.conditions.length) {
-      return rule.conditions.map(describeCond).join(String(rule.match || 'all') === 'any' ? ' OR ' : ' AND ');
-    }
-    if (rule.property) return `${rule.property} ${rule.op || 'equals'} ${JSON.stringify(rule.value)}`;
-    if (rule.pattern) return `name ~ /${rule.pattern}/`;
-    if (rule.tag) return `tag ${rule.tag}`;
-    return '(no trigger)';
+    const conds = ruleConditions(rule);
+    if (!conds.length) return '(no trigger)';
+    const joiner = String(rule.match || 'all').toLowerCase() === 'any' ? ' OR ' : ' AND ';
+    let text = conds.map(describeCond).join(joiner);
+    const blockers = (rule.block || []).map(whenOf).filter(Boolean);
+    if (blockers.length) text += ' · unless ' + blockers.map(describeCond).join(' OR ');
+    return text;
   }
 
   async moveNow(file, kind, notify) {
@@ -475,6 +522,16 @@ class AutoNoteMoverPlugin extends Plugin {
       if (notify) new Notice(`[Auto Note Mover+] could not move ${file.name}: ${e.message}`);
       return null;
     }
+  }
+
+  /** How many notes in the vault a rule would claim right now. */
+  countMatches(rule) {
+    let n = 0;
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const ctx = this.context(file);
+      if (ctx && ruleMatches(rule, ctx)) n++;
+    }
+    return n;
   }
 
   plan() {
@@ -754,7 +811,24 @@ class AnmSettingTab extends PluginSettingTab {
         .setTooltip('Preview moves').setButtonText('Preview moves')
         .onClick(() => this.plugin.preview()));
 
-    /* ---- One row per rule: same three inputs, one extra button ---- */
+    /* ---- Layout switch (classic rows are upstream's) ---- */
+    new Setting(this.containerEl)
+      .setName('Rule layout')
+      .setDesc('Pills read as one sentence and fit a phone; classic rows are the original three inputs.')
+      .addDropdown((d) => d
+        .addOption('pills', 'Pills')
+        .addOption('rows', 'Classic rows')
+        .setValue(this.uiMode())
+        .onChange(async (value) => {
+          s.rule_ui = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+
+    /* ---- One row per rule ---- */
+    if (this.uiMode() === 'pills') {
+      s.folder_tag_pattern.forEach((rule, index) => this.renderPillRow(rule, index));
+    } else
     s.folder_tag_pattern.forEach((rule, index) => {
       const settings = s.folder_tag_pattern;
       const settingTag = settings.map((e) => e.tag);
@@ -927,10 +1001,436 @@ class AnmSettingTab extends PluginSettingTab {
       }));
   }
 
+  uiMode() {
+    return String(this.plugin.settings.rule_ui || 'pills') === 'rows' ? 'rows' : 'pills';
+  }
+
+  /** One rule as a sentence: folder, condition pills, unless-blockers. */
+  renderPillRow(rule, index) {
+    const s = this.plugin.settings;
+    const setting = new Setting(this.containerEl);
+    if (setting.infoEl) setting.infoEl.remove();
+    const bar = setting.controlEl.createDiv({ cls: 'anm-rule' });
+    const openEditor = () => new RuleEditorModal(this.app, this.plugin, rule, async () => {
+      await this.plugin.saveSettings();
+      this.display();
+    }).open();
+
+    const folder = bar.createDiv({ cls: 'anm-pill anm-pill-folder' });
+    folder.createSpan({ cls: 'anm-pill-glyph', text: '→' });
+    folder.createSpan({ cls: 'anm-pill-text', text: rule.folder || 'choose folder' });
+    folder.onclick = openEditor;
+
+    const conds = pillConds(rule);
+    const joiner = String(rule.match || 'all').toLowerCase() === 'any' ? '∨' : '∧';
+    if (!conds.length) bar.createSpan({ cls: 'anm-empty-inline', text: 'no condition' });
+    conds.forEach((cond, i) => {
+      if (i > 0) bar.createSpan({ cls: 'anm-connector', text: joiner });
+      const pill = bar.createDiv({ cls: 'anm-pill anm-pill-cond' });
+      pill.createSpan({ cls: 'anm-pill-glyph', text: PILL_GLYPH[cond.kind] || '?' });
+      pill.createSpan({ cls: 'anm-pill-text', text: pillText(cond) });
+      pill.onclick = openEditor;
+    });
+
+    const blockers = pillBlockers(rule);
+    if (blockers.length) {
+      bar.createSpan({ cls: 'anm-unless', text: 'unless' });
+      for (const cond of blockers) {
+        const pill = bar.createDiv({ cls: 'anm-pill anm-pill-block' });
+        pill.createSpan({ cls: 'anm-pill-glyph', text: PILL_GLYPH[cond.kind] || '?' });
+        pill.createSpan({ cls: 'anm-pill-text', text: pillText(cond) });
+        pill.onclick = openEditor;
+      }
+    }
+
+    setting.addExtraButton((cb) => cb.setIcon('chevron-up').setTooltip('Move up').onClick(async () => {
+      arrayMove(s.folder_tag_pattern, index, index - 1);
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+    setting.addExtraButton((cb) => cb.setIcon('chevron-down').setTooltip('Move down').onClick(async () => {
+      arrayMove(s.folder_tag_pattern, index, index + 1);
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+    setting.addExtraButton((cb) => cb.setIcon('x').setTooltip('Delete').onClick(async () => {
+      s.folder_tag_pattern.splice(index, 1);
+      await this.plugin.saveSettings();
+      this.display();
+    }));
+  }
+
   hasCondition(rule) {
     return !!(rule.property || (Array.isArray(rule.conditions) && rule.conditions.length)
       || (Array.isArray(rule.block) && rule.block.length));
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Pills — one rule reads as a sentence                               */
+/* ------------------------------------------------------------------ */
+
+const PILL_GLYPH = { tag: '#', pattern: '/', prop: '=' };
+
+function pillConds(rule) {
+  const list = (Array.isArray(rule.when) && rule.when.length) ? rule.when
+    : (Array.isArray(rule.conditions) && rule.conditions.length) ? rule.conditions
+      : ruleConditions(rule);
+  return list.map((c) => {
+    if (c && c.kind) return c;
+    if (c && c.tag !== undefined) return { kind: 'tag', value: c.tag };
+    if (c && c.pattern !== undefined) return { kind: 'pattern', value: c.pattern };
+    if (c && c.property) return { kind: 'prop', property: c.property, op: c.op || 'equals', value: c.value };
+    return null;
+  }).filter(Boolean);
+}
+
+function pillBlockers(rule) {
+  return (rule.block || []).map((c) => {
+    if (c && c.kind) return c;
+    if (c && c.tag !== undefined) return { kind: 'tag', value: c.tag };
+    if (c && c.pattern !== undefined) return { kind: 'pattern', value: c.pattern };
+    if (c && c.property) return { kind: 'prop', property: c.property, op: c.op || 'equals', value: c.value };
+    return null;
+  }).filter(Boolean);
+}
+
+function pillText(c) {
+  if (!c) return '';
+  if (c.kind === 'tag') return String(c.value || '');
+  if (c.kind === 'pattern') return '/' + String(c.value || '') + '/';
+  const v = c.value === undefined || c.value === null ? '' : String(c.value);
+  return `${c.property || 'property'} ${c.op || 'equals'}${v ? ' ' + v : ''}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Vault introspection for the property editor                        */
+/* ------------------------------------------------------------------ */
+
+function collectFrontmatter(app) {
+  const keys = new Map();
+  for (const file of app.vault.getMarkdownFiles()) {
+    const fm = (app.metadataCache.getFileCache(file) || {}).frontmatter || {};
+    for (const [key, value] of Object.entries(fm)) {
+      if (!keys.has(key)) keys.set(key, { key, count: 0, values: new Map() });
+      const entry = keys.get(key);
+      entry.count += 1;
+      const vals = Array.isArray(value) ? value : [value];
+      for (const v of vals) {
+        if (v === null || v === undefined || typeof v === 'object') continue;
+        const str = String(v);
+        entry.values.set(str, (entry.values.get(str) || 0) + 1);
+      }
+    }
+  }
+  return [...keys.values()].sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+const TEXT_OPS = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with',
+  'regex', 'in', 'not_in', 'exists', 'missing', 'empty', 'not_empty'];
+const NUMBER_OPS = ['equals', 'not_equals', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'not_in',
+  'exists', 'missing', 'empty', 'not_empty'];
+const DATE_OPS = ['before', 'after', 'on', 'within', 'older_than', 'newer_than', 'weekday', 'month',
+  'equals', 'not_equals', 'exists', 'missing'];
+const BOOL_OPS = ['equals', 'not_equals', 'exists', 'missing'];
+
+function inferKeyType(values) {
+  const sample = values.slice(0, 25).map((v) => String(v).trim()).filter(Boolean);
+  if (!sample.length) return 'text';
+  if (sample.every((v) => /^(true|false)$/i.test(v) && v.length)) {
+    const lower = sample.map((v) => v.toLowerCase());
+    if (lower.every((v) => v === 'true' || v === 'false')) return 'boolean';
+  }
+  if (sample.every((v) => /^-?\d+(\.\d+)?$/.test(v))) return 'number';
+  if (sample.every((v) => parseDateMs(v) !== null || /^(today|yesterday|tomorrow|now)$/i.test(v))) return 'date';
+  return 'text';
+}
+
+function opsForType(type) {
+  if (type === 'number') return NUMBER_OPS;
+  if (type === 'date') return DATE_OPS;
+  if (type === 'boolean') return BOOL_OPS;
+  return TEXT_OPS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Rule sheet — folder, pills, blockers, settle                       */
+/* ------------------------------------------------------------------ */
+
+class RuleEditorModal extends Modal {
+  constructor(app, plugin, rule, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.rule = rule;
+    this.onDone = onDone;
+    this.when = pillConds(rule);
+    this.block = pillBlockers(rule);
+    this.match = String(rule.match || 'all').toLowerCase() === 'any' ? 'any' : 'all';
+    this.folder = rule.folder || '';
+    this.settle = rule.settle === undefined ? '' : String(rule.settle);
+  }
+
+  onOpen() {
+    this.render();
+  }
+
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass('anm-sheet');
+    contentEl.createEl('h2', { text: 'Rule' });
+
+    const intro = contentEl.createEl('p', { cls: 'setting-item-description' });
+    intro.appendText('A note is moved when it matches the conditions and none of the blockers. ');
+    intro.appendText('Rules are checked from the top; the first match wins.');
+
+    // Folder
+    new Setting(contentEl)
+      .setName('Folder')
+      .setDesc('Where a matching note is moved.')
+      .addSearch((cb) => {
+        cb.setPlaceholder('Folder').setValue(this.folder)
+          .onChange((value) => { this.folder = value.trim(); this.refreshCount(); });
+        attachSuggest(cb.inputEl, vaultFolders(this.app), (picked) => {
+          this.folder = picked;
+          this.render();
+        });
+      });
+
+    // Matches all/any
+    if (this.when.length > 1) {
+      new Setting(contentEl)
+        .setName('Conditions')
+        .setDesc('Whether a note must satisfy all of them, or any one.')
+        .addDropdown((d) => d
+          .addOption('all', 'all')
+          .addOption('any', 'any')
+          .setValue(this.match)
+          .onChange((value) => { this.match = value; this.refreshCount(); }));
+    }
+
+    this.renderConditions(contentEl, 'Conditions', this.when, 'No conditions yet — add one below.');
+    this.renderAdders(contentEl, this.when);
+
+    contentEl.createEl('h3', { text: 'Unless' });
+    const unlessDesc = contentEl.createEl('p', { cls: 'setting-item-description' });
+    unlessDesc.appendText('Any blocker that matches vetoes this rule, even when the conditions do.');
+    this.renderConditions(contentEl, null, this.block, 'No blockers.');
+    this.renderAdders(contentEl, this.block);
+
+    new Setting(contentEl)
+      .setName('Settle')
+      .setDesc('Optional. Overrides the settle delay for this rule.')
+      .addText((t) => t.setPlaceholder('2000').setValue(this.settle)
+        .onChange((value) => { this.settle = value.trim(); }));
+
+    this.countEl = contentEl.createEl('p', { cls: 'anm-count' });
+    this.refreshCount();
+
+    const err = contentEl.createEl('p', { cls: 'anm-error' });
+    this.errEl = err;
+
+    new Setting(contentEl)
+      .addButton((b) => b.setButtonText('Done').setCta().onClick(async () => {
+        try {
+          await this.commit();
+          this.close();
+        } catch (e) {
+          err.setText(String(e.message || e));
+        }
+      }))
+      .addButton((b) => b.setButtonText('Clear rule').setWarning().onClick(async () => {
+        this.when = [];
+        this.block = [];
+        this.folder = '';
+        await this.commit();
+        this.close();
+      }))
+      .addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+  }
+
+  renderConditions(parent, title, list, emptyText) {
+    if (title) parent.createEl('h3', { text: title });
+    if (!list.length) {
+      parent.createEl('p', { cls: 'anm-empty', text: emptyText });
+      return;
+    }
+    list.forEach((cond, i) => {
+      const row = new Setting(parent);
+      row.setName(pillText(cond) || '(empty)');
+      row.setDesc(cond.kind === 'prop'
+        ? 'Frontmatter condition'
+        : cond.kind === 'tag' ? 'Tag' : 'Title by regex');
+
+      if (cond.kind !== 'prop') {
+        row.addText((t) => t.setValue(String(cond.value || ''))
+          .onChange((value) => {
+            cond.value = cond.kind === 'tag' ? value.trim() : value;
+            this.refreshCount();
+          }));
+      } else {
+        row.addButton((b) => b.setButtonText('Edit…').onClick(() => {
+          new PropertyEditorModal(this.app, this.plugin, cond, () => this.render()).open();
+        }));
+      }
+
+      row.addExtraButton((cb) => cb.setIcon('x').setTooltip('Remove').onClick(async () => {
+        list.splice(i, 1);
+        this.render();
+      }));
+    });
+  }
+
+  renderAdders(parent, list) {
+    const adder = new Setting(parent).setName('Add').setDesc('Tag, title by regex, or a frontmatter property.');
+    adder.addButton((b) => b.setButtonText('+ Tag').onClick(() => {
+      list.push({ kind: 'tag', value: '' });
+      this.render();
+    }));
+    adder.addButton((b) => b.setButtonText('+ Title').onClick(() => {
+      list.push({ kind: 'pattern', value: '' });
+      this.render();
+    }));
+    adder.addButton((b) => b.setButtonText('+ Property').onClick(() => {
+      const cond = { kind: 'prop', property: '', op: 'equals', value: '' };
+      new PropertyEditorModal(this.app, this.plugin, cond, () => {
+        list.push(cond);
+        this.render();
+      }).open();
+    }));
+  }
+
+  /** Notes in the vault this rule would claim right now. */
+  refreshCount() {
+    if (!this.countEl) return;
+    const probe = this.toRule();
+    const n = this.plugin.countMatches(probe);
+    this.countEl.setText(n === 1 ? '1 note in the vault matches.' : `${n} notes in the vault match.`);
+  }
+
+  toRule() {
+    const rule = { folder: this.folder };
+    if (this.match === 'any') rule.match = 'any';
+    if (this.when.length) rule.when = this.when.map((c) => ({ ...c }));
+    if (this.block.length) rule.block = this.block.map((c) => ({ ...c }));
+    if (this.settle !== '') rule.settle = this.settle;
+    return rule;
+  }
+
+  async commit() {
+    const next = this.toRule();
+    if (!next.folder) throw new Error('Choose a destination folder.');
+    if (!next.when || !next.when.length) throw new Error('Add at least one condition.');
+    for (const c of [...(next.when || []), ...(next.block || [])]) {
+      if (c.kind === 'prop' && !c.property) throw new Error('A property condition needs a key.');
+      if (c.kind === 'pattern') {
+        try { new RegExp(c.value || ''); } catch (e) { throw new Error('Bad regular expression: ' + e.message); }
+      }
+    }
+    applyRuleShape(next);
+    for (const key of Object.keys(this.rule)) delete this.rule[key];
+    Object.assign(this.rule, next);
+    await this.plugin.saveSettings();
+    if (this.onDone) this.onDone();
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ------------------------------------------------------------------ */
+/* Property editor — the vault's own keys and values                  */
+/* ------------------------------------------------------------------ */
+
+class PropertyEditorModal extends Modal {
+  constructor(app, plugin, cond, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.cond = cond;
+    this.onDone = onDone;
+    this.keys = collectFrontmatter(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl('h2', { text: 'Property' });
+
+    const keys = this.keys;
+    const known = keys.find((k) => k.key === this.cond.property);
+    let type = known ? inferKeyType([...known.values.keys()]) : 'text';
+    let op = this.cond.op || 'equals';
+
+    new Setting(contentEl)
+      .setName('Key')
+      .setDesc('Frontmatter keys used in this vault, most common first.')
+      .addDropdown((d) => {
+        d.addOption('', '— choose a key —');
+        for (const k of keys.slice(0, 200)) d.addOption(k.key, `${k.key} (${k.count})`);
+        for (const extra of ['file.mtime', 'file.ctime', 'file.age', 'file.size', 'file.name', 'file.folder']) {
+          d.addOption(extra, extra);
+        }
+        return d.setValue(this.cond.property || '').onChange((value) => {
+          this.cond.property = value;
+          const found = keys.find((k) => k.key === value);
+          type = found ? inferKeyType([...found.values.keys()]) : (value.startsWith('file.') ? 'date' : 'text');
+          this.cond.value = '';
+          this.render();
+        });
+      })
+      .addText((t) => t.setPlaceholder('or type a key')
+        .setValue(this.cond.property || '')
+        .onChange((value) => { this.cond.property = value.trim(); }));
+
+    new Setting(contentEl)
+      .setName('Operator')
+      .setDesc('Filtered to the operators that suit this key.')
+      .addDropdown((d) => {
+        for (const o of opsForType(type)) d.addOption(o, o);
+        if (!opsForType(type).includes(op)) op = opsForType(type)[0];
+        return d.setValue(op).onChange((value) => { op = value; this.cond.op = value; this.refresh(); });
+      });
+    this.cond.op = op;
+
+    const valueSetting = new Setting(contentEl).setName('Value').setDesc('A literal, a date, a duration such as 14d, or a list in brackets.');
+    valueSetting.addText((t) => t.setPlaceholder('value')
+      .setValue(this.cond.value === undefined ? '' : String(this.cond.value))
+      .onChange((value) => { this.cond.value = value; this.refresh(); }));
+    const values = known ? [...known.values.keys()] : [];
+    if (values.length) {
+      valueSetting.addDropdown((d) => {
+        d.addOption('', '— seen in this vault —');
+        for (const v of values.slice(0, 200)) d.addOption(v, v.length > 60 ? v.slice(0, 60) + '…' : v);
+        return d.setValue('').onChange((value) => {
+          if (!value) return;
+          this.cond.value = value;
+          this.render();
+        });
+      });
+    }
+
+    this.countEl = contentEl.createEl('p', { cls: 'anm-count' });
+    this.refresh();
+
+    new Setting(contentEl)
+      .addButton((b) => b.setButtonText('Save').setCta().onClick(() => {
+        if (!this.cond.property) {
+          new Notice('Choose a key first.');
+          return;
+        }
+        if (this.onDone) this.onDone();
+        this.close();
+      }))
+      .addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+  }
+
+  refresh() {
+    if (!this.countEl) return;
+    const probe = { folder: '_', when: [{ ...this.cond }] };
+    const n = this.plugin.countMatches(probe);
+    this.countEl.setText(n === 1 ? '1 note matches this condition.' : `${n} notes match this condition.`);
+  }
+
+  onClose() { this.contentEl.empty(); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1063,8 +1563,11 @@ class ConditionModal extends Modal {
 }
 
 // Test seam: the settings tab and condition editor are exercised headlessly.
-AutoNoteMoverPlugin._ui = { AnmSettingTab, ConditionModal, PreviewModal, attachSuggest, arrayMove };
+AutoNoteMoverPlugin._ui = { AnmSettingTab, ConditionModal, PreviewModal, RuleEditorModal,
+  PropertyEditorModal, attachSuggest, arrayMove, pillConds, pillBlockers, pillText,
+  ruleConditions, applyRuleShape, collectFrontmatter, inferKeyType, opsForType };
 AutoNoteMoverPlugin._engine = {
   OPS, parseDateMs, parseDurationMs, parseWhenMs, checkCondition, ruleMatches, firstMatch, eqValues,
+  whenOf, ruleConditions, applyRuleShape,
 };
 module.exports = AutoNoteMoverPlugin;
